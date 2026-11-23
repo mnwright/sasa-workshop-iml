@@ -15,5 +15,4 @@ into the same directory. The rendered HTML can be viewed in a browser.
 
 ## Website
 
-The site is published with GitHub Pages from the `main` branch and repository
-root. Visit <http://wrig.de/sasa-workshop-iml/>.
+Visit <http://wrig.de/sasa-workshop-iml/>.
