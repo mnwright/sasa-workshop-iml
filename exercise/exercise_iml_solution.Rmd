@@ -1,0 +1,280 @@
+---
+title: "SASA 2026 Workshop: Interpretable Machine Learning (IML)"
+subtitle: "Solution"
+author: "Marvin N. Wright"
+date: "November 2026"
+output: 
+  html_document:
+    code_folding: show
+    self_contained: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, cache = TRUE)
+library(ggplot2)
+ggplot2::theme_set(theme_bw())
+set.seed(2025)
+```
+
+## Setup and data preparation
+
+We use data from the [National Health and Nutrition Examination Survey (NHANES)](https://www.cdc.gov/nchs/nhanes/) 2017--March 2020 to predict HbA1c (`glycohemoglobin`) from age, gender, ancestry, BMI, glucose, eGFR, cholesterol and smoking in adults. The file `nhanes_hba1c.csv` was created from the public NHANES data with the script `data_prep.R`.
+```{r setup_dataprep, message=FALSE, warning=FALSE}
+# load data
+dat = read.csv("nhanes_hba1c.csv", stringsAsFactors = TRUE)
+
+# convert integer variables to numeric
+dat[] = lapply(dat, function(x) if (is.integer(x)) as.numeric(x) else x)
+
+# define outcome variable
+var.outcome = "glycohemoglobin"
+
+# define two data sets for training and external validation based on sequential 
+# ID, then remove the ID (it is not a feature)
+ind_train = which(dat$SEQN < 120000)
+dat$SEQN = NULL
+dat_train = dat[ind_train, ]
+dat_val = dat[-ind_train, ]
+```
+
+## Fit a prediction model
+
+Now fit a prediction model, e.g., a random forest with the *ranger* package. 
+
+```{r fit_model}
+library(ranger)
+model = ranger(
+  x = dat_train[, !(colnames(dat_train) == var.outcome)],
+  y = dat_train[, var.outcome]
+)
+```
+
+Check the performance, is it OK? We don't want to explain a bad model.
+
+```{r check_perf}
+pred = predict(model, data = dat_val)$predictions
+obs = dat_val[, var.outcome]
+sqrt(mean((pred-obs)^2)) # RMSE
+```
+
+## Feature effects
+
+We start with feature effects. They are implemented in the *iml* package. For help, see the [package website](https://giuseppec.github.io/iml/). Create a partial dependence plot (PDP), individual conditional expectation (ICE) plots, and an accumulated local effects (ALE) plot for the feature "age". How to interpret it? Do you find any other interesting features?
+
+<details>
+<summary>💡 **Hint 1**:</summary>
+First create a `Predictor` object that wraps the model and the data. 
+</details>
+
+<details>
+<summary>💡 **Hint 2**:</summary>
+Then call `FeatureEffect$new(...)` and `plot(...)` on the result.
+</details>
+
+```{r predictor_object}
+library(iml)
+# Create a Predictor object
+predictor = Predictor$new(
+  model = model, 
+  data = dat_train[, !(colnames(dat_train) == var.outcome)], 
+  y = dat_train[, var.outcome]
+)
+```
+
+```{r pdp, warning=FALSE}
+# Partial Dependence Plot (PDP) 
+eff = FeatureEffect$new(predictor, feature = "age", method = "pdp")
+plot(eff)
+```
+
+```{r ice_pdp, warning=FALSE}
+# Individual Conditional Expectation (ICE) + PDP
+eff = FeatureEffect$new(predictor, feature = "age", method = "pdp+ice")
+plot(eff)
+```
+
+```{r ale, warning=FALSE}
+# Accumulated Local Effects (ALE)
+eff = FeatureEffect$new(predictor, feature = "age", method = "ale")
+plot(eff)
+```
+
+## Feature importance
+Now, let's try feature importance. For permutation feature importance, we can use the *iml* package again. We can also re-use the `Predictor` object we created above. Plot PFI for all features (in one plot). Which are the most important features for the model?
+
+<details>
+<summary>💡 **Hint**:</summary>
+The syntax is similar to feature effects. Call `FeatureImp$new(...)` and `plot(...)` on the result.</details>
+
+```{r pfi, warning=FALSE}
+# Permutation feature importance (PFI)
+imp = FeatureImp$new(predictor, loss = "rmse", compare = "difference")
+plot(imp)
+```
+
+Conditional feature importance is not available in the *iml* package. We can use the *cpi* package instead. It uses the *mlr3* package for machine learning, which makes it a little bit more complex if you have not used it before. For help, see the [package website](https://bips-hb.github.io/cpi/). Since our dataset has mixed continuous and categorical features, we have to use the *seqknockoff* package to generate knockoff variables. This package is only available from Github, so you have to install it first using the command `devtools::install_github("kormama1/seqknockoff")`.
+
+⚠️ **This is a rather difficult exercise. Feel free to skip it if you have no experience with mlr3.** ⚠️
+
+<details>
+<summary>💡 **Hint 1**:</summary>
+First create a regression task with *mlr3* from our data. 
+</details>
+
+<details>
+<summary>💡 **Hint 2**:</summary>
+Then run `cpi(...)` on the task. Look at the examples in the `cpi` help. 
+</details>
+
+```{r cfi, warning=FALSE, message=FALSE}
+library(cpi)
+# devtools::install_github("kormama1/seqknockoff")
+library(seqknockoff)
+library(mlr3verse)
+
+mytask = as_task_regr(dat_train, target = var.outcome)
+imp_cpi = cpi(task = mytask, learner = lrn("regr.ranger"), 
+              resampling = rsmp("holdout"), 
+              knockoff_fun = seqknockoff::knockoffs_seq)
+
+```
+
+Now plot the results, e.g., using *ggplot2*. Are the results different than those from PFI? Which features differ and why?
+
+```{r cfi_plot}
+ggplot(data.frame(feature = imp_cpi$Variable, importance = imp_cpi$CPI), 
+       aes(x = reorder(feature, importance), y = importance)) +
+  geom_point(size = 3) + 
+  coord_flip() + 
+  xlab("Feature")
+```
+
+For LOCO (Leave-One-Covariate-Out), let's try to implement it manually. Do you remember the algorithm?
+
+<details>
+<summary>💡 **Hint**:</summary>
+First, fit a full model with all features. Then, for each feature, fit a new model without this feature and calculate the increase in RMSE on the validation data.
+</details>
+
+```{r loco}
+feature_names = colnames(dat_train)[colnames(dat_train) != var.outcome]
+imp_loco = sapply(feature_names, function(var){
+  model_loco = ranger(
+    x = dat_train[, !(colnames(dat_train) %in% c(var.outcome, var))],
+    y = dat_train[, var.outcome]
+  )
+  pred_loco = predict(model_loco, data = dat_val)$predictions
+  sqrt(mean((pred_loco - obs)^2)) - sqrt(mean((pred - obs)^2)) # RMSE
+})
+```
+
+Now plot the results. Are the results different than those from PFI and CFI? 
+
+```{r loco_plot}
+ggplot(data.frame(feature = feature_names, importance = imp_loco), 
+       aes(x = reorder(feature, importance), y = importance)) +
+  geom_point(size = 3) + 
+  coord_flip() + 
+  xlab("Feature")
+```
+
+## Shapley values
+
+There are several packages for Shapley values. Here, we use the *fastshap* package. For help, see the [package website](https://bgreenwell.github.io/fastshap/). For visualization, we recommend the *shapviz* package; [package website](https://modeloriented.github.io/shapviz/).
+
+First, calculate SHAP values with *fastshap*.
+
+<details>
+<summary>💡 **Hint 1**:</summary>
+This time, we need a prediction wrapper function that takes the model and new data as input and returns the predictions.
+</details>
+
+<details>
+<summary>💡 **Hint 2**:</summary>
+The prediction wrapper for ranger could look like this: `pfun = function(object, newdata) { predict(object, data = newdata)$predictions }`
+</details>
+
+<details>
+<summary>💡 **Hint 3**:</summary>
+Call `fastshap::explain(...)` on the model, training data, and prediction wrapper function.
+</details>
+
+<details>
+<summary>💡 **Hint 4**:</summary>
+Use `adjust = TRUE` (requires `nsim > 1`, e.g. `nsim = 10`) so that the SHAP values of each observation sum up to its prediction minus the average prediction. This also sets the baseline needed for the plots.
+</details>
+
+```{r fastshap, warning=FALSE, message=FALSE}
+library(fastshap)
+
+pfun = function(object, newdata) {
+  predict(object, data = newdata)$predictions
+}
+fs = fastshap::explain(object = model, 
+                       X = dat_train[, !(colnames(dat_train) == var.outcome)], 
+                       pred_wrapper = pfun, nsim = 10, adjust = TRUE)
+
+```
+
+Then create a *shapviz* object for visualization.
+
+<details>
+<summary>💡 **Hint**:</summary>
+Call `shapviz(...)` on the SHAP values and training data.
+</details>
+
+```{r shapviz}
+library(shapviz)
+fsv = shapviz(fs, X = dat_train[, !(colnames(dat_train) == var.outcome)])
+
+```
+
+Now create some plots. They are all functions starting with `sv_...`. Try importance, beeswarm/summary and dependence (as you know from the lecture). You can also try local explanations with waterfall and force. 
+
+<details>
+<summary>💡 **Hint 1**:</summary>
+The beeswarm plot is also implemented in `sv_importance` (argument `kind = "beeswarm"`).
+</details>
+
+<details>
+<summary>💡 **Hint 2**:</summary>
+Dependence plots can be colored with argument `color_var`.
+</details>
+
+<details>
+<summary>💡 **Hint 3**:</summary>
+For local explanations, you need to specify a row index (e.g., 1 or 2) to be explained.
+</details>
+
+```{r sv_importance, warning=FALSE, message=FALSE}
+# Importance plot
+sv_importance(fsv)
+```
+
+```{r sv_beeswarm, warning=FALSE, message=FALSE}
+# Beeswarm / summary plot
+sv_importance(fsv, kind = "beeswarm")
+```
+
+```{r sv_dependence, warning=FALSE, message=FALSE}
+# Dependence plot
+sv_dependence(fsv, "age", color_var = NULL)
+```
+
+```{r sv_dependence2, warning=FALSE, message=FALSE}
+# Colored dependence plot
+sv_dependence(fsv, "age", color_var = "gender")
+```
+
+```{r sv_waterfall, warning=FALSE, message=FALSE}
+# Waterfall plot
+sv_waterfall(fsv, 1)
+```
+
+```{r sv_force, warning=FALSE, message=FALSE}
+# Force plot
+sv_force(fsv, 2)
+```
+
+
+
