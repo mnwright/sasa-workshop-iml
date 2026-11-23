@@ -7,6 +7,8 @@ Workshop materials for the SASA 2026 workshop on Interpretable Machine Learning.
 - [Workshop slides (PDF)](2026_SASA_Workshop_IML.pdf)
 - [Interactive exercise (HTML)](exercise/exercise_iml.html)
 - [Exercise source (R Markdown)](exercise/exercise_iml.Rmd)
+- [Exercise solutions (HTML)](exercise/exercise_iml_solution.html)
+- [Exercise solutions source (R Markdown)](exercise/exercise_iml_solution.Rmd)
 - [Exercise data (CSV)](exercise/nhanes_hba1c.csv)
 - [Data preparation script (R)](exercise/data_prep.R)
 
